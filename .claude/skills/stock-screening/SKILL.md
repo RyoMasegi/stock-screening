@@ -95,9 +95,44 @@ python .claude/skills/stock-screening/scripts/stage2_screen.py --in results/stag
   - yfinanceの指標はリアルタイムではなく遅延データであり、決算発表直後は反映が遅れることがある
   - 上場から10期に満たない銘柄・IR BANKにページがない銘柄は第2段階の対象外
 
+## 自動実行（Windowsタスクスケジューラー、ローカルのみ）
+
+クラウド(Anthropicのクラウド実行環境)は、Yahoo Finance/IR BANK/JPXへのアウトバウンド接続が
+組織ポリシーで遮断されており使用不可(検証済み)。そのため自動実行はこのマシン上で
+Windowsタスクスケジューラーにより行う。
+
+- `scripts/weekly_run.py` — 週次フルスキャン(第1段階全市場→第2段階→メール送信)。
+  `results/candidates_latest.csv` に最終候補を保存し、翌日以降の日次再チェックが参照する。
+- `scripts/daily_run.py` — 日次再チェック。`results/candidates_latest.csv` の銘柄だけを
+  最新値で再確認してメール送信。週次結果がまだ無い場合はその旨だけ通知して終了する。
+- `scripts/send_email.py` — Gmail SMTP(アプリパスワード)でのメール送信ヘルパー。
+  プロジェクトルートの `.env` に `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` / `MAIL_TO` が必要
+  (`.env.example` 参照、2段階認証が有効なアカウントでのみアプリパスワードを発行可能)。
+
+タスクスケジューラー登録例(PowerShell、管理者権限不要):
+
+```powershell
+$py = (Get-Command python).Source
+$root = "C:\Users\Ryo\Desktop\kabu"
+
+$actionWeekly = New-ScheduledTaskAction -Execute $py -Argument "`"$root\.claude\skills\stock-screening\scripts\weekly_run.py`"" -WorkingDirectory $root
+$triggerWeekly = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 6:00am
+Register-ScheduledTask -TaskName "StockScreening-Weekly" -Action $actionWeekly -Trigger $triggerWeekly -Description "株スクリーニング週次フルスキャン"
+
+$actionDaily = New-ScheduledTaskAction -Execute $py -Argument "`"$root\.claude\skills\stock-screening\scripts\daily_run.py`"" -WorkingDirectory $root
+$triggerDaily = New-ScheduledTaskTrigger -Daily -At 6:00am
+Register-ScheduledTask -TaskName "StockScreening-Daily" -Action $actionDaily -Trigger $triggerDaily -Description "株スクリーニング日次再チェック(月曜は週次が兼ねるため実質火〜日曜分のみ意味を持つ)"
+```
+
+PCが6時にスリープ/シャットダウン中だと実行されない点に注意(タスクのプロパティで
+「スケジュールされた時刻を過ぎている場合はできるだけ早くタスクを実行する」を有効にすると
+起動時に追いつき実行される)。
+
 ## ファイル構成
 
 - `scripts/jpx_universe.py` — JPX公式サイトから東証上場銘柄一覧(data_j.xlsx)を取得・市場区分でフィルタ
 - `scripts/stage1_screen.py` — Yahoo Finance(yfinance)によるスナップショット指標スクリーニング
 - `scripts/stage2_screen.py` — IR BANKによるEPS/BPS/配当10期推移スクリーニング
-- `requirements.txt` — 依存パッケージ（yfinance, pandas, openpyxl, beautifulsoup4, lxml）
+- `scripts/weekly_run.py` / `scripts/daily_run.py` — 自動実行用オーケストレーション+メール送信
+- `scripts/send_email.py` — Gmail SMTP送信ヘルパー
+- `requirements.txt` — 依存パッケージ（yfinance, pandas, openpyxl, beautifulsoup4, lxml, python-dotenv）

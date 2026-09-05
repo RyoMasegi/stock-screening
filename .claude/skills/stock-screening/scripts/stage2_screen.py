@@ -32,6 +32,13 @@ RESULTS_DIR = ROOT / "results"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
+STAGE2_COLUMNS = [
+    "コード", "銘柄名", "対象期間", "EPS(今期)", "EPS(9期前)", "EPS成長倍率",
+    "BPS(今期)", "BPS(9期前)", "一株配当(今期)", "減配回数", "第2段階合格",
+    "cond:EPS10期マイナスなし", "cond:今期EPS>=9期前x2", "cond:BPS10期連続増額",
+    "cond:減配2回未満", "cond:無配転落なし",
+]
+
 
 def fetch_results_html(code: str, use_cache: bool = True) -> str:
     cache_path = CACHE_DIR / f"{code}.html"
@@ -167,7 +174,7 @@ def main() -> None:
         print(f"  [{i + 1}/{total}] {code} {name}: {'済' if res is None else ('合格' if res['第2段階合格'] else '不合格')}")
         time.sleep(args.sleep)
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results, columns=STAGE2_COLUMNS) if results else pd.DataFrame(columns=STAGE2_COLUMNS)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.out) if args.out else RESULTS_DIR / f"stage2_{date.today():%Y%m%d}.csv"
     df.to_csv(out_path, index=False, encoding="utf-8-sig")

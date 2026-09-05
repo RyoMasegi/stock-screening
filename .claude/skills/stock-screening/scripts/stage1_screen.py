@@ -33,6 +33,13 @@ INFO_CACHE_DIR = DATA_DIR / "cache" / "yfinance" / "info"
 BS_CACHE_DIR = DATA_DIR / "cache" / "yfinance" / "balance_sheet"
 RESULTS_DIR = ROOT / "results"
 
+STAGE1_COLUMNS = [
+    "コード", "銘柄名", "市場区分", "株価", "PER", "PBR", "ROE%", "ROA%",
+    "配当利回り%", "自己資本比率%", "時価総額(億円)", "第1段階合格",
+    "cond:PER<=12", "cond:PBR<=1.3", "cond:ROE>=7%", "cond:ROA>=3%",
+    "cond:配当利回り>=3%", "cond:自己資本比率>=35%", "cond:時価総額>=1000億円",
+]
+
 DEFAULT_CRITERIA = {
     "per_max": 12,
     "pbr_max": 1.3,
@@ -198,7 +205,7 @@ def main() -> None:
             print(f"  {i + 1}/{total} 処理済み...")
         time.sleep(args.sleep)
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results, columns=STAGE1_COLUMNS) if results else pd.DataFrame(columns=STAGE1_COLUMNS)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.out) if args.out else RESULTS_DIR / f"stage1_{date.today():%Y%m%d}.csv"
     df.to_csv(out_path, index=False, encoding="utf-8-sig")
