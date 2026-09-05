@@ -14,6 +14,7 @@ data/cache/yfinance/ にキャッシュし、再実行時は既存キャッシ�
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 import time
@@ -192,30 +193,37 @@ def main() -> None:
     total = len(universe)
     print(f"対象銘柄数: {total}")
 
-    results = []
-    excluded_log = []
-    for i, row in enumerate(universe.to_dict("records")):
-        code, name, market = row["Code"], row["CompanyName"], row["MarketSegment"]
-        res, reason = evaluate(code, name, market, DEFAULT_CRITERIA, use_cache=not args.no_cache)
-        if res is not None:
-            results.append(res)
-        if reason:
-            excluded_log.append(reason)
-        if (i + 1) % 50 == 0:
-            print(f"  {i + 1}/{total} 処理済み...")
-        time.sleep(args.sleep)
-
-    df = pd.DataFrame(results, columns=STAGE1_COLUMNS) if results else pd.DataFrame(columns=STAGE1_COLUMNS)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.out) if args.out else RESULTS_DIR / f"stage1_{date.today():%Y%m%d}.csv"
-    df.to_csv(out_path, index=False, encoding="utf-8-sig")
-
-    passed = df[df["第1段階合格"]] if not df.empty and "第1段階合格" in df.columns else df.iloc[0:0]
-    print(f"\n第1段階合格: {len(passed)}銘柄 / 評価対象: {len(df)}銘柄 / 除外: {len(excluded_log)}銘柄")
-    print(f"結果を保存しました: {out_path}")
-
     log_path = RESULTS_DIR / f"stage1_excluded_{date.today():%Y%m%d}.log"
-    log_path.write_text("\n".join(excluded_log), encoding="utf-8")
+
+    # 全銘柄評価には長時間かかり得るため、タスクスケジューラーのタイムアウト等で
+    # 途中終了しても結果が失われないよう、1銘柄ごとに追記・flushする。
+    passed_count = 0
+    result_count = 0
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as out_f, \
+         open(log_path, "w", encoding="utf-8") as log_f:
+        writer = csv.DictWriter(out_f, fieldnames=STAGE1_COLUMNS)
+        writer.writeheader()
+
+        for i, row in enumerate(universe.to_dict("records")):
+            code, name, market = row["Code"], row["CompanyName"], row["MarketSegment"]
+            res, reason = evaluate(code, name, market, DEFAULT_CRITERIA, use_cache=not args.no_cache)
+            if res is not None:
+                writer.writerow(res)
+                out_f.flush()
+                result_count += 1
+                if res["第1段階合格"]:
+                    passed_count += 1
+            if reason:
+                log_f.write(reason + "\n")
+                log_f.flush()
+            if (i + 1) % 50 == 0:
+                print(f"  {i + 1}/{total} 処理済み...")
+            time.sleep(args.sleep)
+
+    print(f"\n第1段階合格: {passed_count}銘柄 / 評価対象: {result_count}銘柄")
+    print(f"結果を保存しました: {out_path}")
     print(f"除外理由ログ: {log_path}")
 
 

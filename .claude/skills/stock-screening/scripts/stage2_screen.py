@@ -15,6 +15,7 @@ irbank.net の robots.txt は全面クロールを許可しているが、礼儀
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import sys
 import time
@@ -157,34 +158,40 @@ def main() -> None:
     total = len(stage1)
     print(f"第2段階の対象(第1段階合格)銘柄数: {total}")
 
-    results = []
-    excluded_log = []
-    for i, row in enumerate(stage1.to_dict("records")):
-        code, name = row["コード"], row["銘柄名"]
-        try:
-            html = fetch_results_html(code, use_cache=not args.no_cache)
-            res, reason = evaluate(code, name, html)
-        except Exception as exc:  # noqa: BLE001
-            res, reason = None, f"{code} {name}: 取得/解析エラー {exc}"
-
-        if res is not None:
-            results.append(res)
-        if reason:
-            excluded_log.append(reason)
-        print(f"  [{i + 1}/{total}] {code} {name}: {'済' if res is None else ('合格' if res['第2段階合格'] else '不合格')}")
-        time.sleep(args.sleep)
-
-    df = pd.DataFrame(results, columns=STAGE2_COLUMNS) if results else pd.DataFrame(columns=STAGE2_COLUMNS)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.out) if args.out else RESULTS_DIR / f"stage2_{date.today():%Y%m%d}.csv"
-    df.to_csv(out_path, index=False, encoding="utf-8-sig")
-
-    passed = df[df["第2段階合格"]] if not df.empty and "第2段階合格" in df.columns else df.iloc[0:0]
-    print(f"\n最終合格(第1段階+第2段階すべて合致): {len(passed)}銘柄 / 第2段階評価対象: {len(df)}銘柄 / 除外: {len(excluded_log)}銘柄")
-    print(f"結果を保存しました: {out_path}")
-
     log_path = RESULTS_DIR / f"stage2_excluded_{date.today():%Y%m%d}.log"
-    log_path.write_text("\n".join(excluded_log), encoding="utf-8")
+
+    # 途中終了しても結果が失われないよう、1銘柄ごとに追記・flushする。
+    passed_count = 0
+    result_count = 0
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as out_f, \
+         open(log_path, "w", encoding="utf-8") as log_f:
+        writer = csv.DictWriter(out_f, fieldnames=STAGE2_COLUMNS)
+        writer.writeheader()
+
+        for i, row in enumerate(stage1.to_dict("records")):
+            code, name = row["コード"], row["銘柄名"]
+            try:
+                html = fetch_results_html(code, use_cache=not args.no_cache)
+                res, reason = evaluate(code, name, html)
+            except Exception as exc:  # noqa: BLE001
+                res, reason = None, f"{code} {name}: 取得/解析エラー {exc}"
+
+            if res is not None:
+                writer.writerow(res)
+                out_f.flush()
+                result_count += 1
+                if res["第2段階合格"]:
+                    passed_count += 1
+            if reason:
+                log_f.write(reason + "\n")
+                log_f.flush()
+            print(f"  [{i + 1}/{total}] {code} {name}: {'済' if res is None else ('合格' if res['第2段階合格'] else '不合格')}")
+            time.sleep(args.sleep)
+
+    print(f"\n最終合格(第1段階+第2段階すべて合致): {passed_count}銘柄 / 第2段階評価対象: {result_count}銘柄")
+    print(f"結果を保存しました: {out_path}")
     print(f"除外理由ログ: {log_path}")
 
 
