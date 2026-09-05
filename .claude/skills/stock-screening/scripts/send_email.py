@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import os
 import smtplib
-from email.mime.text import MIMEText
 from email.header import Header
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,7 +24,7 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
 
-def send_email(subject: str, body: str) -> None:
+def send_email(subject: str, body: str, attachment_path: str | Path | None = None) -> None:
     address = os.environ.get("GMAIL_ADDRESS")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
     to_addr = os.environ.get("MAIL_TO") or address
@@ -33,7 +35,16 @@ def send_email(subject: str, body: str) -> None:
             ".claude/skills/stock-screening/.env.example を参照してください。"
         )
 
-    msg = MIMEText(body, "plain", "utf-8")
+    if attachment_path:
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        path = Path(attachment_path)
+        part = MIMEApplication(path.read_bytes(), Name=path.name)
+        part["Content-Disposition"] = f'attachment; filename="{path.name}"'
+        msg.attach(part)
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
+
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = address
     msg["To"] = to_addr

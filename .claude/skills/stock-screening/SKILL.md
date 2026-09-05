@@ -101,27 +101,37 @@ python .claude/skills/stock-screening/scripts/stage2_screen.py --in results/stag
 組織ポリシーで遮断されており使用不可(検証済み)。そのため自動実行はこのマシン上で
 Windowsタスクスケジューラーにより行う。
 
-- `scripts/weekly_run.py` — 週次フルスキャン(第1段階全市場→第2段階→メール送信)。
-  `results/candidates_latest.csv` に最終候補を保存し、翌日以降の日次再チェックが参照する。
-- `scripts/daily_run.py` — 日次再チェック。`results/candidates_latest.csv` の銘柄だけを
-  最新値で再確認してメール送信。週次結果がまだ無い場合はその旨だけ通知して終了する。
-- `scripts/send_email.py` — Gmail SMTP(アプリパスワード)でのメール送信ヘルパー。
-  プロジェクトルートの `.env` に `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` / `MAIL_TO` が必要
-  (`.env.example` 参照、2段階認証が有効なアカウントでのみアプリパスワードを発行可能)。
+現在の実際のスケジュール(タスクスケジューラーに登録済み):
+- **StockScreening-Weekly**: 毎週土曜 6:00
+- **StockScreening-Daily**: 日〜金曜 6:00(土曜は週次フルスキャンが担うため除外、重複実行を避ける)
 
-タスクスケジューラー登録例(PowerShell、管理者権限不要):
+- `scripts/weekly_run.py` — 週次フルスキャン(第1段階全市場→第2段階→HTMLレポート生成→メール添付送信)。
+  `results/candidates_latest.csv` に最終候補を保存し、翌日以降の日次再チェックが参照する。
+  全銘柄評価は実測で2〜3時間程度かかることがあるため、タスクの実行時間制限は無制限(`PT0S`)にしてある。
+- `scripts/daily_run.py` — 日次再チェック。`results/candidates_latest.csv` の銘柄だけを
+  最新値で再確認してプレーンテキストメール送信。週次結果がまだ無い場合はその旨だけ通知して終了する。
+- `scripts/generate_report.py` — 週次フルスキャン専用。絞り込みファネル・最終候補一覧(PERの低い順)・
+  12条件(第1段階7+第2段階5)の合否チェック表(○×)・銘柄ごとのEPS/BPS/1株配当10期推移グラフ
+  (matplotlib、base64埋め込み)を1つの自己完結HTMLファイルにまとめる。日次再チェックでは使わない。
+- `scripts/send_email.py` — Gmail SMTP(アプリパスワード)でのメール送信ヘルパー。`attachment_path`を
+  渡すとファイル添付も可能。プロジェクトルートの `.env` に `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` /
+  `MAIL_TO` が必要(`.env.example` 参照、2段階認証が有効なアカウントでのみアプリパスワードを発行可能)。
+
+タスクスケジューラー登録例(PowerShell、管理者権限不要。曜日を変更する場合は
+`Set-ScheduledTask -TaskName ... -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek ...)` で更新する):
 
 ```powershell
 $py = (Get-Command python).Source
 $root = "C:\Users\Ryo\Desktop\kabu"
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 $actionWeekly = New-ScheduledTaskAction -Execute $py -Argument "`"$root\.claude\skills\stock-screening\scripts\weekly_run.py`"" -WorkingDirectory $root
-$triggerWeekly = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 6:00am
-Register-ScheduledTask -TaskName "StockScreening-Weekly" -Action $actionWeekly -Trigger $triggerWeekly -Description "株スクリーニング週次フルスキャン"
+$triggerWeekly = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 6:00am
+Register-ScheduledTask -TaskName "StockScreening-Weekly" -Action $actionWeekly -Trigger $triggerWeekly -Settings $settings -Description "株スクリーニング週次フルスキャン" -Force
 
 $actionDaily = New-ScheduledTaskAction -Execute $py -Argument "`"$root\.claude\skills\stock-screening\scripts\daily_run.py`"" -WorkingDirectory $root
-$triggerDaily = New-ScheduledTaskTrigger -Daily -At 6:00am
-Register-ScheduledTask -TaskName "StockScreening-Daily" -Action $actionDaily -Trigger $triggerDaily -Description "株スクリーニング日次再チェック(月曜は週次が兼ねるため実質火〜日曜分のみ意味を持つ)"
+$triggerDaily = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday,Monday,Tuesday,Wednesday,Thursday,Friday -At 6:00am
+Register-ScheduledTask -TaskName "StockScreening-Daily" -Action $actionDaily -Trigger $triggerDaily -Settings $settings -Description "株スクリーニング日次再チェック(週次と同じ曜日は除外)" -Force
 ```
 
 PCが6時にスリープ/シャットダウン中だと実行されない点に注意(タスクのプロパティで
@@ -132,7 +142,8 @@ PCが6時にスリープ/シャットダウン中だと実行されない点に�
 
 - `scripts/jpx_universe.py` — JPX公式サイトから東証上場銘柄一覧(data_j.xlsx)を取得・市場区分でフィルタ
 - `scripts/stage1_screen.py` — Yahoo Finance(yfinance)によるスナップショット指標スクリーニング
-- `scripts/stage2_screen.py` — IR BANKによるEPS/BPS/配当10期推移スクリーニング
+- `scripts/stage2_screen.py` — IR BANKによるEPS/BPS/配当10期推移スクリーニング(`--series-out`で生データもJSON出力可)
+- `scripts/generate_report.py` — 週次結果をグラフ付きHTMLレポートに整形(メール添付用)
 - `scripts/weekly_run.py` / `scripts/daily_run.py` — 自動実行用オーケストレーション+メール送信
-- `scripts/send_email.py` — Gmail SMTP送信ヘルパー
-- `requirements.txt` — 依存パッケージ（yfinance, pandas, openpyxl, beautifulsoup4, lxml, python-dotenv）
+- `scripts/send_email.py` — Gmail SMTP送信ヘルパー(添付ファイル対応)
+- `requirements.txt` — 依存パッケージ（yfinance, pandas, openpyxl, beautifulsoup4, lxml, python-dotenv, matplotlib）

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -101,11 +102,11 @@ def evaluate(code: str, name: str, html: str):
 
     if eps_series is None or bps_series is None or dps_series is None:
         missing = [n for n, s in [("EPS", eps_series), ("BPS", bps_series), ("一株配当", dps_series)] if s is None]
-        return None, f"{code} {name}: ページ構造からテーブルを特定できない({','.join(missing)}) — 対象外"
+        return None, f"{code} {name}: ページ構造からテーブルを特定できない({','.join(missing)}) — 対象外", None
 
     common_years = sorted(set(eps_series) & set(bps_series) & set(dps_series), reverse=True)
     if len(common_years) < 10:
-        return None, f"{code} {name}: 3指標共通の年次データが10期分ない(取得{len(common_years)}期) — 対象外"
+        return None, f"{code} {name}: 3指標共通の年次データが10期分ない(取得{len(common_years)}期) — 対象外", None
 
     years = common_years[:10]
     eps_list = [eps_series[y] for y in years]
@@ -113,7 +114,7 @@ def evaluate(code: str, name: str, html: str):
     dps_list = [dps_series[y] for y in years]
 
     if any(v is None for v in eps_list + bps_list + dps_list):
-        return None, f"{code} {name}: EPS/BPS/配当のいずれかが直近10期内で欠損 — 対象外"
+        return None, f"{code} {name}: EPS/BPS/配当のいずれかが直近10期内で欠損 — 対象外", None
 
     decreases = sum(1 for i in range(len(dps_list) - 1) if dps_list[i] < dps_list[i + 1])
 
@@ -140,7 +141,14 @@ def evaluate(code: str, name: str, html: str):
         "第2段階合格": passed,
     }
     result.update({f"cond:{k}": v for k, v in checks.items()})
-    return result, None
+
+    series = {
+        "years": list(reversed(years)),
+        "eps": list(reversed(eps_list)),
+        "bps": list(reversed(bps_list)),
+        "dps": list(reversed(dps_list)),
+    }
+    return result, None, series
 
 
 def main() -> None:
@@ -149,6 +157,7 @@ def main() -> None:
     parser.add_argument("--no-cache", action="store_true", help="IR BANKキャッシュを使わず再取得する")
     parser.add_argument("--sleep", type=float, default=1.5, help="リクエスト間のスリープ秒数(サイトへの配慮)")
     parser.add_argument("--out", default=None, help="出力CSVパス")
+    parser.add_argument("--series-out", default=None, help="銘柄ごとのEPS/BPS/配当10期生データをJSONで出力するパス(レポート生成用)")
     args = parser.parse_args()
 
     stage1 = pd.read_csv(args.in_path, dtype={"コード": str})
@@ -165,6 +174,7 @@ def main() -> None:
     # 途中終了しても結果が失われないよう、1銘柄ごとに追記・flushする。
     passed_count = 0
     result_count = 0
+    all_series: dict[str, dict] = {}
     with open(out_path, "w", newline="", encoding="utf-8-sig") as out_f, \
          open(log_path, "w", encoding="utf-8") as log_f:
         writer = csv.DictWriter(out_f, fieldnames=STAGE2_COLUMNS)
@@ -174,9 +184,9 @@ def main() -> None:
             code, name = row["コード"], row["銘柄名"]
             try:
                 html = fetch_results_html(code, use_cache=not args.no_cache)
-                res, reason = evaluate(code, name, html)
+                res, reason, series = evaluate(code, name, html)
             except Exception as exc:  # noqa: BLE001
-                res, reason = None, f"{code} {name}: 取得/解析エラー {exc}"
+                res, reason, series = None, f"{code} {name}: 取得/解析エラー {exc}", None
 
             if res is not None:
                 writer.writerow(res)
@@ -184,6 +194,8 @@ def main() -> None:
                 result_count += 1
                 if res["第2段階合格"]:
                     passed_count += 1
+                if series is not None:
+                    all_series[code] = series
             if reason:
                 log_f.write(reason + "\n")
                 log_f.flush()
@@ -193,6 +205,10 @@ def main() -> None:
     print(f"\n最終合格(第1段階+第2段階すべて合致): {passed_count}銘柄 / 第2段階評価対象: {result_count}銘柄")
     print(f"結果を保存しました: {out_path}")
     print(f"除外理由ログ: {log_path}")
+
+    if args.series_out:
+        Path(args.series_out).write_text(json.dumps(all_series, ensure_ascii=False), encoding="utf-8")
+        print(f"10期推移データ: {args.series_out}")
 
 
 if __name__ == "__main__":
