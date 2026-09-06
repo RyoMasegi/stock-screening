@@ -25,6 +25,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+import yfinance as yf
 
 matplotlib.rcParams["font.family"] = ["Yu Gothic", "Meiryo", "MS Gothic", "sans-serif"]
 matplotlib.rcParams["axes.unicode_minus"] = False
@@ -36,7 +37,7 @@ STAGE1_CONDS = [
     ("cond:ROA>=3%", "ROA3%以上"),
     ("cond:配当利回り>=3%", "配当利回り3%以上"),
     ("cond:自己資本比率>=35%", "自己資本比率35%以上"),
-    ("cond:時価総額>=1000億円", "時価総額1000億円以上"),
+    ("cond:時価総額>=100億円", "時価総額100億円以上"),
 ]
 STAGE2_CONDS = [
     ("cond:EPS10期マイナスなし", "EPS赤字なし"),
@@ -49,17 +50,77 @@ STAGE2_CONDS = [
 CHART_COLORS = {"eps": "#4C72B0", "bps": "#55A868", "dps": "#C44E52"}
 
 
-def make_chart_b64(series: dict) -> str:
+def fetch_price_series(code: str, year_labels: list[str]) -> dict[str, float]:
+    """各決算期末日に最も近い取引日の終値を10年分の株価履歴から取得する。
+
+    yfinanceの株価履歴は財務諸表と違い長期間さかのぼれるため、
+    stage2の10期分の年度ラベル(例: "2017/03")に対応する終値を個別に引き当てる。
+    取得できない場合は空辞書を返し、呼び出し側でグラフ・PERレンジ計算を
+    スキップできるようにする(ネットワーク障害等でレポート全体を止めない)。
+    """
+    try:
+        hist = yf.Ticker(f"{code}.T").history(period="10y")
+    except Exception:  # noqa: BLE001
+        return {}
+    if hist is None or hist.empty:
+        return {}
+    hist = hist.sort_index()
+    idx = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+
+    prices: dict[str, float] = {}
+    for label in year_labels:
+        try:
+            y, m = label.split("/")
+            target = pd.Timestamp(year=int(y), month=int(m), day=1) + pd.offsets.MonthEnd(0)
+        except ValueError:
+            continue
+        pos = idx.get_indexer([target], method="nearest")
+        if pos[0] == -1:
+            continue
+        prices[label] = float(hist["Close"].iloc[pos[0]])
+    return prices
+
+
+def per_range(years: list[str], eps_list: list[float], price_map: dict[str, float]):
+    """10期分の(期末株価 / 期のEPS)からPERレンジ(最小, 最大)を計算する。EPSが0以下の期は除外。"""
+    values = []
+    for y, eps in zip(years, eps_list):
+        price = price_map.get(y)
+        if price is not None and eps and eps > 0:
+            values.append(price / eps)
+    if not values:
+        return None, None
+    return min(values), max(values)
+
+
+def make_chart_b64(series: dict, price_map: dict[str, float]) -> str:
     years = series["years"]
-    fig, axes = plt.subplots(1, 3, figsize=(9, 2.3))
-    for ax, key, label in zip(axes, ["eps", "bps", "dps"], ["EPS(円)", "BPS(円)", "1株配当(円)"]):
-        values = series[key]
-        ax.bar(years, values, color=CHART_COLORS[key])
-        ax.set_title(label, fontsize=9)
-        ax.tick_params(axis="x", rotation=90, labelsize=6)
-        ax.tick_params(axis="y", labelsize=6)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 2.3))
+
+    axes[0].bar(years, series["eps"], color=CHART_COLORS["eps"])
+    axes[0].set_title("EPS(円)", fontsize=9)
+
+    axes[1].bar(years, series["bps"], color=CHART_COLORS["bps"])
+    axes[1].set_title("BPS(円)", fontsize=9)
+
+    ax = axes[2]
+    ax.bar(years, series["dps"], color=CHART_COLORS["dps"], alpha=0.55)
+    ax.set_title("株価(線)・配当(棒)", fontsize=9)
+    price_values = [price_map.get(y) for y in years]
+    plot_years = [y for y, p in zip(years, price_values) if p is not None]
+    plot_prices = [p for p in price_values if p is not None]
+    if plot_prices:
+        ax_price = ax.twinx()
+        ax_price.plot(plot_years, plot_prices, color="#333333", marker="o", markersize=3, linewidth=1.3)
+        ax_price.set_ylim(bottom=0)  # 0始まりにしないと株価の相対的な下落と誤認されるため
+        ax_price.tick_params(axis="y", labelsize=6)
+        ax_price.spines["top"].set_visible(False)
+
+    for a in axes:
+        a.tick_params(axis="x", rotation=90, labelsize=6)
+        a.tick_params(axis="y", labelsize=6)
+        a.spines["top"].set_visible(False)
+        a.spines["right"].set_visible(False)
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110)
@@ -112,8 +173,16 @@ def build_html(stage1_df, stage2_df, candidates, series_map, counts, excluded_co
     for _, row in candidates.iterrows():
         code = str(row["コード"])
         chart_b64 = None
+        per_line = ""
         if code in series_map:
-            chart_b64 = make_chart_b64(series_map[code])
+            series = series_map[code]
+            price_map = fetch_price_series(code, series["years"])
+            chart_b64 = make_chart_b64(series, price_map)
+            p_min, p_max = per_range(series["years"], series["eps"], price_map)
+            if p_min is not None:
+                per_line = f" / 10年PERレンジ: {p_min:.1f}倍〜{p_max:.1f}倍(現在 {row['PER']:.2f}倍)"
+            else:
+                per_line = " / 10年PERレンジ: 株価データ取得不可"
         chart_html = (
             f'<img class="chart" src="data:image/png;base64,{chart_b64}" alt="{escape(code)} 10期推移">'
             if chart_b64 else "<p class='muted'>グラフ用データなし</p>"
@@ -122,7 +191,7 @@ def build_html(stage1_df, stage2_df, candidates, series_map, counts, excluded_co
         <div class="card">
           <h3>{escape(str(row['銘柄名']))} ({escape(code)})</h3>
           <p class="muted">PER {row['PER']:.2f}倍 / PBR {row['PBR']:.2f}倍 / 配当利回り {row['配当利回り%']:.2f}% /
-             時価総額 {row['時価総額(億円)']:.0f}億円 / EPS成長倍率 {row['EPS成長倍率']:.2f}倍(9期前比)</p>
+             時価総額 {row['時価総額(億円)']:.0f}億円 / EPS成長倍率 {row['EPS成長倍率']:.2f}倍(9期前比){per_line}</p>
           {chart_html}
         </div>""")
 
@@ -170,7 +239,7 @@ def build_html(stage1_df, stage2_df, candidates, series_map, counts, excluded_co
     <tbody>{''.join(table_rows)}</tbody>
   </table>
 
-  <h2>銘柄別 10期推移(EPS・BPS・1株配当)</h2>
+  <h2>銘柄別 10期推移(EPS・BPS・株価/配当・PERレンジ)</h2>
   {''.join(detail_sections)}
 
   <footer>
