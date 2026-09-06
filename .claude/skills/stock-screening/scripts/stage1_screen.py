@@ -18,7 +18,8 @@ import csv
 import json
 import sys
 import time
-from datetime import date
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -36,9 +37,10 @@ RESULTS_DIR = ROOT / "results"
 
 STAGE1_COLUMNS = [
     "コード", "銘柄名", "市場区分", "株価", "PER", "PBR", "ROE%", "ROA%",
-    "配当利回り%", "自己資本比率%", "時価総額(億円)", "第1段階合格",
+    "配当利回り%", "自己資本比率%", "時価総額(億円)", "最終取引日", "第1段階合格",
     "cond:PER<=12", "cond:PBR<=1.3", "cond:ROE>=7%", "cond:ROA>=3%",
     "cond:配当利回り>=3%", "cond:自己資本比率>=35%", "cond:時価総額>=100億円",
+    "cond:直近営業日に取引あり",
 ]
 
 DEFAULT_CRITERIA = {
@@ -115,6 +117,9 @@ def evaluate(code: str, name: str, market: str, criteria: dict, use_cache: bool)
     pbr = to_float(info.get("priceToBook"))
     roe = to_float(info.get("returnOnEquity"))
     roa = to_float(info.get("returnOnAssets"))
+    # yfinanceのdividendYieldは常に%表記の数値(例:3.2 = 3.2%)で返る(実測1600銘柄超で確認済み、
+    # 比率表記との混在はない)。かつて0〜1なら100倍する変換を入れていたが、これは低利回り銘柄
+    # (例:実際0.85%)を誤って85%に変換してしまう明確なバグだったため撤廃した。
     div_yield = to_float(info.get("dividendYield")) or 0.0
     market_cap = to_float(info.get("marketCap"))
 
@@ -122,10 +127,6 @@ def evaluate(code: str, name: str, market: str, criteria: dict, use_cache: bool)
         roe *= 100
     if roa is not None:
         roa *= 100
-    # yfinanceのdividendYieldは環境により「%表記の数値(例:3.2)」と「比率(例:0.032)」が
-    # 混在することがあるため、0〜1の範囲ならパーセントに変換する。
-    if div_yield and div_yield < 1:
-        div_yield *= 100
 
     try:
         equity_ratio = fetch_equity_ratio(code, use_cache)
@@ -152,6 +153,12 @@ def evaluate(code: str, name: str, market: str, criteria: dict, use_cache: bool)
     }
     passed = all(checks.values())
 
+    market_time = info.get("regularMarketTime")
+    last_quote_date = (
+        datetime.fromtimestamp(market_time, tz=timezone.utc).date().isoformat()
+        if market_time else None
+    )
+
     result = {
         "コード": code,
         "銘柄名": name,
@@ -164,6 +171,7 @@ def evaluate(code: str, name: str, market: str, criteria: dict, use_cache: bool)
         "配当利回り%": round(div_yield, 2),
         "自己資本比率%": round(equity_ratio, 2),
         "時価総額(億円)": round(market_cap / 1e8, 1),
+        "最終取引日": last_quote_date,
         "第1段階合格": passed,
     }
     result.update({f"cond:{k}": v for k, v in checks.items()})
@@ -199,7 +207,10 @@ def main() -> None:
 
     # 全銘柄評価には長時間かかり得るため、タスクスケジューラーのタイムアウト等で
     # 途中終了しても結果が失われないよう、1銘柄ごとに追記・flushする。
-    passed_count = 0
+    # (直近営業日チェックは全銘柄評価後でないと基準日が定まらないため、all_rowsに
+    #  貯めておき完走後に再判定・再書き込みする。途中終了時はこの再判定なしの
+    #  結果がそのまま残る。)
+    all_rows: list[dict] = []
     result_count = 0
     with open(out_path, "w", newline="", encoding="utf-8-sig") as out_f, \
          open(log_path, "w", encoding="utf-8") as log_f:
@@ -213,8 +224,7 @@ def main() -> None:
                 writer.writerow(res)
                 out_f.flush()
                 result_count += 1
-                if res["第1段階合格"]:
-                    passed_count += 1
+                all_rows.append(res)
             if reason:
                 log_f.write(reason + "\n")
                 log_f.flush()
@@ -222,7 +232,41 @@ def main() -> None:
                 print(f"  {i + 1}/{total} 処理済み...")
             time.sleep(args.sleep)
 
-    print(f"\n第1段階合格: {passed_count}銘柄 / 評価対象: {result_count}銘柄")
+    # 直近営業日に取引が反映されていない銘柄(売買停止・上場廃止手続き中の疑い)を検出する。
+    # JPX公式銘柄一覧は削除の反映が遅れることがあるため、評価した銘柄群の中で最も多い
+    # 「最終取引日」(=通常の最終営業日)を基準日とし、そこから大きく遅れている銘柄を
+    # 「第1段階合格」から除外する。あくまでヒューリスティックであり、閾値内の1〜数日の
+    # 未約定は流動性の低い銘柄でも起こり得るため、それ自体は除外しない。
+    STALE_TOLERANCE_DAYS = 3
+    dated = [r for r in all_rows if r.get("最終取引日")]
+    stale_excluded = []
+    if dated:
+        mode_date_str = Counter(r["最終取引日"] for r in dated).most_common(1)[0][0]
+        mode_date = date.fromisoformat(mode_date_str)
+        for r in all_rows:
+            last = r.get("最終取引日")
+            fresh = True
+            if last:
+                gap = (mode_date - date.fromisoformat(last)).days
+                fresh = gap <= STALE_TOLERANCE_DAYS
+            r["cond:直近営業日に取引あり"] = fresh
+            if not fresh:
+                r["第1段階合格"] = False
+                stale_excluded.append(f"{r['コード']} {r['銘柄名']}: 最終取引日{last}が基準日{mode_date_str}よりも古い(取引停止/上場廃止の疑い) — 対象外")
+
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as out_f:
+            writer = csv.DictWriter(out_f, fieldnames=STAGE1_COLUMNS)
+            writer.writeheader()
+            for r in all_rows:
+                writer.writerow(r)
+
+        if stale_excluded:
+            with open(log_path, "a", encoding="utf-8") as log_f:
+                log_f.write("\n".join(stale_excluded) + "\n")
+
+    passed_count = sum(1 for r in all_rows if r["第1段階合格"])
+
+    print(f"\n第1段階合格: {passed_count}銘柄 / 評価対象: {result_count}銘柄 / 取引停止疑いで除外: {len(stale_excluded)}銘柄")
     print(f"結果を保存しました: {out_path}")
     print(f"除外理由ログ: {log_path}")
 
