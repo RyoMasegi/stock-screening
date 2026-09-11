@@ -3,7 +3,7 @@
 
 条件:
   PER<=12, PBR<=1.3, ROE>=7%, ROA>=3%, 配当利回り>=3%,
-  自己資本比率>=35%, 時価総額>=100億円
+  自己資本比率>=35%, 時価総額>=500億円
 
 銘柄一覧はJPX公式の東証上場銘柄一覧(data_j.xlsx)から取得する(認証不要)。
 1銘柄につき yfinance の .info と 年次貸借対照表 の2リクエストを行うため、
@@ -39,7 +39,7 @@ STAGE1_COLUMNS = [
     "コード", "銘柄名", "市場区分", "株価", "PER", "PBR", "ROE%", "ROA%",
     "配当利回り%", "自己資本比率%", "時価総額(億円)", "最終取引日", "第1段階合格",
     "cond:PER<=12", "cond:PBR<=1.3", "cond:ROE>=7%", "cond:ROA>=3%",
-    "cond:配当利回り>=3%", "cond:自己資本比率>=35%", "cond:時価総額>=100億円",
+    "cond:配当利回り>=3%", "cond:自己資本比率>=35%", "cond:時価総額>=500億円",
     "cond:直近営業日に取引あり",
 ]
 
@@ -50,7 +50,7 @@ DEFAULT_CRITERIA = {
     "roa_min": 3,
     "div_yield_min": 3,
     "equity_ratio_min": 35,
-    "market_cap_min": 10_000_000_000,  # 100億円
+    "market_cap_min": 50_000_000_000,  # 500億円
 }
 
 
@@ -149,7 +149,7 @@ def evaluate(code: str, name: str, market: str, criteria: dict, use_cache: bool)
         "ROA>=3%": roa >= criteria["roa_min"],
         "配当利回り>=3%": div_yield >= criteria["div_yield_min"],
         "自己資本比率>=35%": equity_ratio >= criteria["equity_ratio_min"],
-        "時価総額>=100億円": market_cap >= criteria["market_cap_min"],
+        "時価総額>=500億円": market_cap >= criteria["market_cap_min"],
     }
     passed = all(checks.values())
 
